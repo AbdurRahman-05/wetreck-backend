@@ -10,7 +10,7 @@ import sendAdminEmailRouter from './sendAdminEmail.js';
 
 const app = express();
 app.use(cors({
-  origin: '*',
+  origin: ['https://wetreckindia.netlify.app', 'http://localhost:5173'],
   credentials: true,
 }));
 app.use(bodyParser.json());
