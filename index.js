@@ -4,6 +4,7 @@ import cors from 'cors';
 import bodyParser from 'body-parser';
 import mongoose from 'mongoose';
 import cron from 'node-cron';
+import Razorpay from 'razorpay';
 import { sendEmail } from './mail.js';
 import connectDB from './db.js';
 import sendAdminEmailRouter from './sendAdminEmail.js';
@@ -15,10 +16,21 @@ app.use(cors({
 }));
 app.use(bodyParser.json());
 
+// Initialize Razorpay
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
 // Connect to MongoDB
 connectDB();
 
 app.use('/api/v2', sendAdminEmailRouter);
+
+import { createOrder, verifyPayment } from './payment.js';
+
+app.post('/api/payment/order', createOrder);
+app.post('/api/payment/verify', verifyPayment);
 
 const personDetailsSchema = new mongoose.Schema({
   name: String,
@@ -162,15 +174,81 @@ const Membership = mongoose.model('Membership', membershipSchema);
 // Endpoint to receive membership form submissions
 app.post('/api/membership', async (req, res) => {
   try {
-  const { name, dob, mobile, email, occupation, address, membershipPlan, amount, startDate, endDate } = req.body;
-  console.log('Received membershipPlan value:', membershipPlan);
-  const uniqueCode = Math.random().toString(36).substring(2, 10).toUpperCase();
-    const member = new Membership({ name, dob, mobile, email, occupation, address, membershipPlan: membershipPlan || 'Not specified', amount, startDate, endDate, uniqueCode });
-    await member.save();
+    const { name, dob, mobile, email, occupation, address, membershipPlan, amount, startDate, endDate } = req.body;
 
-    try {
-      // Membership plan details
-      let planDetails = '';
+    const existingMember = await Membership.findOne({ email });
+
+    if (existingMember) {
+      // User is already a member
+      try {
+        // Re-construct plan details for the email
+        let planDetails = '';
+        const planValue = (existingMember.membershipPlan || '').trim().toLowerCase();
+        if (['2 years plan', '2 years membership', '299', 'two years plan', 'two years membership', '2 year plan', '2 year membership'].includes(planValue)) {
+          planDetails = `
+            <h3>Selected Plan: 2 Years Membership</h3>
+            <p><strong>Amount:</strong> ₹299</p>
+            <ul>
+              <li>Valid for 2 years</li>
+              <li>Exclusive trek and bike ride offers</li>
+              <li>Priority booking for popular treks</li>
+              <li>Access to member-only events and webinars</li>
+              <li>Personalized gear consultation</li>
+              <li>Digital membership card</li>
+            </ul>
+          `;
+          if (existingMember.startDate && existingMember.endDate) {
+            planDetails += `
+              <p><strong>Start Date:</strong> ${new Date(existingMember.startDate).toLocaleDateString()}</p>
+              <p><strong>End Date:</strong> ${new Date(existingMember.endDate).toLocaleDateString()}</p>
+            `;
+          }
+        } else if (['lifetime plan', 'lifetime membership', '999', 'life time plan', 'life time membership'].includes(planValue)) {
+          planDetails = `
+            <h3>Selected Plan: Lifetime Membership</h3>
+            <p><strong>Amount:</strong> ₹999</p>
+            <ul>
+              <li>Lifetime exclusive discounts on all treks</li>
+              <li>Free annual trek (one per year)</li>
+              <li>Dedicated trek consultant for planning</li>
+              <li>VIP access to member events and expeditions</li>
+              <li>Physical and digital membership card</li>
+              <li>Special recognition in our community</li>
+            </ul>
+          `;
+        } else if (planValue !== '') {
+          planDetails = `<h3>Selected Plan: ${existingMember.membershipPlan}</h3>`;
+        } else {
+          planDetails = `<p><strong>No plan was selected.</strong></p>`;
+        }
+
+        const userSubject = 'Your WeTrek India Membership Details';
+        const userHtml = `
+          <h1>You are already a member of WeTrek India!</h1>
+          <p>Hello ${existingMember.name},</p>
+          <p>We found your existing membership details in our records.</p>
+          <p>Your Unique Membership Code is: <strong>${existingMember.uniqueCode}</strong></p>
+          <h2>Your Membership Plan</h2>
+          ${planDetails}
+          <p>We are excited to have you on board.</p>
+        `;
+        await sendEmail(email, userSubject, userHtml);
+
+        res.status(200).json({ message: 'You are already a member of the WeTrek India membership plan. We have sent your membership details to your email.' });
+      } catch (emailError) {
+        console.error('Failed to send existing membership email:', emailError);
+        res.status(500).json({ error: 'Failed to send membership details email.' });
+      }
+    } else {
+      // New member registration
+      console.log('Received membershipPlan value:', membershipPlan);
+      const uniqueCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+      const member = new Membership({ name, dob, mobile, email, occupation, address, membershipPlan: membershipPlan || 'Not specified', amount, startDate, endDate, uniqueCode });
+      await member.save();
+
+      try {
+        // Membership plan details
+        let planDetails = '';
         const planValue = (membershipPlan || '').trim().toLowerCase();
         if (['2 years plan', '2 years membership', '299', 'two years plan', 'two years membership', '2 year plan', '2 year membership'].includes(planValue)) {
           planDetails = `
@@ -210,51 +288,52 @@ app.post('/api/membership', async (req, res) => {
           planDetails = `<p><strong>No plan was selected.</strong></p>`;
         }
 
-      const subject = 'New Membership Registration';
-      const html = `
-        <h1>New Membership Registration</h1>
-        <p>A new user has registered with the following details:</p>
-        <ul>
-          <li>Name: ${name}</li>
-          <li>Date of Birth: ${dob}</li>
-          <li>Mobile: ${mobile}</li>
-          <li>Email: ${email}</li>
-          <li>Occupation: ${occupation}</li>
-          <li>Address: ${address}</li>
-          <li>Unique Code: ${uniqueCode}</li>
-        </ul>
-        <h2>Selected Membership Plan</h2>
-        ${planDetails}
-      `;
+        const subject = 'New Membership Registration';
+        const html = `
+          <h1>New Membership Registration</h1>
+          <p>A new user has registered with the following details:</p>
+          <ul>
+            <li>Name: ${name}</li>
+            <li>Date of Birth: ${dob}</li>
+            <li>Mobile: ${mobile}</li>
+            <li>Email: ${email}</li>
+            <li>Occupation: ${occupation}</li>
+            <li>Address: ${address}</li>
+            <li>Unique Code: ${uniqueCode}</li>
+          </ul>
+          <h2>Selected Membership Plan</h2>
+          ${planDetails}
+        `;
 
-      // Send email to admin
-      await sendEmail(process.env.EMAIL_USER, subject, html);
+        // Send email to admin
+        await sendEmail(process.env.EMAIL_USER, subject, html);
 
-      // Send confirmation email to user
-      const userSubject = 'Welcome to our Membership!';
-      const userHtml = `
-        <h1>Welcome to wetreck membership plan!</h1>
-        <p>Thank you for registering for our membership.</p>
-        <p>Your Unique Membership Code is: <strong>${uniqueCode}</strong></p>
-        <h2>Your Selected Plan</h2>
-        ${planDetails}
-        <p>Your chosen plan amount is: ${membershipPlan === '2 Years Membership' || membershipPlan === '299' ? '₹299' : (membershipPlan === 'Lifetime Membership' || membershipPlan === '999' ? '₹999' : 'Not specified')}.</p>
-        <p>We are excited to have you on board.</p>
-      `;
-      await sendEmail(email, userSubject, userHtml);
+        // Send confirmation email to user
+        const userSubject = 'Welcome to our Membership!';
+        const userHtml = `
+          <h1>Welcome to wetreck membership plan!</h1>
+          <p>Thank you for registering for our membership.</p>
+          <p>Your Unique Membership Code is: <strong>${uniqueCode}</strong></p>
+          <h2>Your Selected Plan</h2>
+          ${planDetails}
+          <p>Your chosen plan amount is: ${membershipPlan === '2 Years Membership' || membershipPlan === '299' ? '₹299' : (membershipPlan === 'Lifetime Membership' || membershipPlan === '999' ? '₹999' : 'Not specified')}.</p>
+          <p>We are excited to have you on board.</p>
+        `;
+        await sendEmail(email, userSubject, userHtml);
 
-      res.json({ message: 'Membership info received, saved, and emails sent.' });
-    } catch (emailError) {
-      console.error('Failed to send emails:', emailError);
-      // Still return success to the client, but log the email error
-      res.status(200).json({ message: 'Membership info saved, but failed to send emails.' });
+        res.json({ message: 'Membership info received, saved, and emails sent.' });
+      } catch (emailError) {
+        console.error('Failed to send emails:', emailError);
+        // Still return success to the client, but log the email error
+        res.status(200).json({ message: 'Membership info saved, but failed to send emails.' });
+      }
     }
-
   } catch (err) {
     console.error('Failed to save membership info:', err);
     res.status(500).json({ error: 'Failed to save membership info.' });
   }
 });
+
 
 // Get all users
 app.get('/api/users', async (req, res) => {
